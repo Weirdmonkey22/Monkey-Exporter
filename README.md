@@ -15,7 +15,7 @@ Instructions
 9. At the the bottom of subscriptions under "Home Contact Privacy FAQ" there will be something that says "Export"
 10. Click "Export" and confirm it
 11. Go back to the file you named and click "Choose File" and click the file you've just exported form Weeb Central
-12. Click "Convert" and wait until it's done
+12. Click "Convert" and wait until it's done (5-30 minutes depends on the size)
 13. It will automatically make a XML file or you just click "Download XML"
 14. Go to this page https://myanimelist.net/import.php
 15. Click "Choose import type" and change it to "MyAnimeList Import"
