@@ -1,6 +1,7 @@
 # Monkey-Exporter
 Browser tool that converts a WeebCentral subscription library CSV into a MyAnimeList manga import XML.
 
+Instructions
 1. Download the "DOWNLOAD THIS" code
 2. Open the the file in Notepad
 3. In notepad click "File" the top left corner then click "Save as"
