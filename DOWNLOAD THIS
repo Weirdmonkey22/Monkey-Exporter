@@ -1,1 +1,192 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeebCentral to MyAnimeList converter</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --text: #1d2330; --muted: #5b6475;
+    --line: #d9dde5; --accent: #2e51a2; --accent-text: #ffffff; --ok: #1f7a4d; --bad: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151c; --surface: #1b1f29; --text: #e8ebf2; --muted: #98a1b3;
+      --line: #2e3442; --accent: #6f93e6; --accent-text: #0e1320; --ok: #5cc795; --bad: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 8px; }
+  p { margin: 0 0 16px; color: var(--muted); }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  label.file { display: block; margin-bottom: 14px; color: var(--text); font-weight: 600; }
+  input[type=file] { display: block; margin-top: 8px; font: inherit; color: var(--text); max-width: 100%; }
+  button { font: inherit; font-weight: 600; background: var(--accent); color: var(--accent-text);
+    border: 0; border-radius: 8px; padding: 10px 18px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  progress { width: 100%; height: 10px; margin: 16px 0 6px; }
+  #status { font-size: .95rem; color: var(--muted); min-height: 1.4em; }
+  #log { height: 220px; overflow: auto; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px; font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; margin-top: 12px; white-space: pre-wrap; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  ul { color: var(--muted); padding-left: 20px; margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>WeebCentral to MyAnimeList</h1>
+  <p>Pick your WeebCentral CSV. This page looks up each series' MAL ID through AniList and builds the XML file you upload at myanimelist.net/import.php. Keep this tab open until it finishes (about 5 to 6 minutes for 350 titles).</p>
+
+  <div class="panel">
+    <label class="file">CSV file
+      <input type="file" id="csv" accept=".csv,text/csv">
+    </label>
+    <div class="row">
+      <button id="go" disabled>Convert</button>
+      <button id="dl" disabled>Download XML</button>
+      <button id="dlmiss" disabled>Download unmatched list</button>
+    </div>
+    <progress id="bar" value="0" max="1"></progress>
+    <div id="status" role="status" aria-live="polite">Choose a file to start.</div>
+    <div id="log" aria-label="Progress log"></div>
+  </div>
+
+  <ul>
+    <li>Reading becomes Reading. Finished becomes Completed.</li>
+    <li>Every entry is set to update on import, as MAL requires.</li>
+    <li>Titles that can't be matched are left out and listed in the unmatched file so you can add them by hand.</li>
+  </ul>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let rows = [], xmlOut = "", missOut = "";
+
+// Minimal CSV parser that handles quoted fields and commas inside quotes.
+function parseCSV(text) {
+  text = text.replace(/^\uFEFF/, "");
+  const out = []; let row = [], field = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; }
+      else field += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field); field = ""; out.push(row); row = [];
+    } else field += c;
+  }
+  if (field !== "" || row.length) { row.push(field); out.push(row); }
+  const head = out.shift().map(h => h.trim());
+  return out.filter(r => r.some(x => x.trim())).map(r => Object.fromEntries(head.map((h, i) => [h, (r[i] || "").trim()])));
+}
+
+async function anilist(query, variables) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const res = await fetch("https://graphql.anilist.co", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ query, variables })
+      });
+      if (res.status === 429) { await sleep((parseInt(res.headers.get("Retry-After") || "60", 10) + 1) * 1000); continue; }
+      if (res.status === 404) return null;
+      return await res.json();
+    } catch (e) { await sleep(3000); }
+  }
+  return null;
+}
+const malFromId = async id => {
+  const d = await anilist("query($id:Int){Media(id:$id,type:MANGA){idMal}}", { id });
+  return d && d.data && d.data.Media ? d.data.Media.idMal : null;
+};
+const malFromTitle = async s => {
+  const d = await anilist("query($s:String){Media(search:$s,type:MANGA){idMal}}", { s });
+  return d && d.data && d.data.Media ? d.data.Media.idMal : null;
+};
+
+const cdata = t => "<![CDATA[" + t.replace(/]]>/g, "]]]]><![CDATA[>") + "]]>";
+const entry = (id, title, status) => `  <manga>
+    <manga_mangadb_id>${id}</manga_mangadb_id>
+    <manga_title>${cdata(title)}</manga_title>
+    <manga_volumes>0</manga_volumes>
+    <manga_chapters>0</manga_chapters>
+    <my_id>0</my_id>
+    <my_read_volumes>0</my_read_volumes>
+    <my_read_chapters>0</my_read_chapters>
+    <my_start_date>0000-00-00</my_start_date>
+    <my_finish_date>0000-00-00</my_finish_date>
+    <my_scanalation_group>${cdata("")}</my_scanalation_group>
+    <my_score>0</my_score>
+    <my_storage></my_storage>
+    <my_retail_volumes>0</my_retail_volumes>
+    <my_status>${status}</my_status>
+    <my_comments>${cdata("")}</my_comments>
+    <my_times_read>0</my_times_read>
+    <my_tags>${cdata("")}</my_tags>
+    <my_reread_value></my_reread_value>
+    <update_on_import>1</update_on_import>
+  </manga>
+`;
+
+function log(msg, cls) {
+  const el = $("log"); const s = document.createElement("span");
+  if (cls) s.className = cls; s.textContent = msg + "\n"; el.appendChild(s); el.scrollTop = el.scrollHeight;
+}
+function save(name, text, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+
+$("csv").addEventListener("change", async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    rows = parseCSV(await f.text());
+    if (!rows.length || !("series_name" in rows[0])) throw new Error("Missing series_name column");
+    $("status").textContent = `${rows.length} series found. Press Convert.`;
+    $("go").disabled = false;
+  } catch (err) {
+    $("status").textContent = "That file doesn't look like the WeebCentral export: " + err.message;
+    $("go").disabled = true;
+  }
+});
+
+$("go").addEventListener("click", async () => {
+  $("go").disabled = true; $("dl").disabled = true; $("dlmiss").disabled = true;
+  $("log").textContent = ""; $("bar").max = rows.length; $("bar").value = 0;
+  const entries = [], missing = [], seen = new Set();
+  const map = { reading: "Reading", finished: "Completed" };
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i], title = r.series_name;
+    const status = map[(r.read_status || "").toLowerCase()] || "Plan to Read";
+    let mal = null;
+    const m = (r.anilist || "").match(/anilist\.co\/manga\/(\d+)/);
+    if (m) { mal = await malFromId(parseInt(m[1], 10)); await sleep(800); }
+    if (!mal && title) { mal = await malFromTitle(title); await sleep(800); }
+    if (!mal) { missing.push(`${title}\t${r.read_status}`); log(`No match: ${title}`, "bad"); }
+    else if (seen.has(mal)) log(`Duplicate skipped: ${title}`);
+    else { seen.add(mal); entries.push(entry(mal, title, status)); log(`${mal}  ${title}`, "ok"); }
+    $("bar").value = i + 1;
+    $("status").textContent = `${i + 1} of ${rows.length} checked`;
+  }
+  xmlOut = '<?xml version="1.0" encoding="UTF-8" ?>\n<myanimelist>\n  <myinfo>\n    <user_export_type>2</user_export_type>\n  </myinfo>\n' + entries.join("") + "</myanimelist>\n";
+  missOut = missing.join("\n");
+  $("status").textContent = `Done. ${entries.length} entries ready, ${missing.length} unmatched.`;
+  $("dl").disabled = false; $("dlmiss").disabled = !missing.length; $("go").disabled = false;
+  save("mal_manga_import.xml", xmlOut, "application/xml");
+});
+$("dl").addEventListener("click", () => save("mal_manga_import.xml", xmlOut, "application/xml"));
+$("dlmiss").addEventListener("click", () => save("mal_unmatched.txt", missOut, "text/plain"));
+</script>
+</body>
+</html>
